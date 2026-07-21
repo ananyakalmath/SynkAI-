@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "http://localhost:8000"
     CORS_ORIGINS: List[str] = ["http://localhost:8501", "http://127.0.0.1:8501"]
 
+    # Ollama LLM Configuration
+    OLLAMA_BASE_URL: str = "http://localhost:11434"
+    OLLAMA_MODEL: str = "qwen3"
+
+    # File Upload Configuration
+    UPLOADS_DIR: str = "uploads"
+    MAX_UPLOAD_SIZE_MB: int = 10
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
