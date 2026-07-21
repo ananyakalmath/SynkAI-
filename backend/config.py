@@ -20,9 +20,14 @@ class Settings(BaseSettings):
     BACKEND_URL: str = "http://localhost:8000"
     CORS_ORIGINS: List[str] = ["http://localhost:8501", "http://127.0.0.1:8501"]
 
-    # Ollama LLM Configuration
+    # Ollama LLM & Embedding Models
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_MODEL: str = "qwen3"
+    OLLAMA_EMBED_MODEL: str = "nomic-embed-text"
+
+    # ChromaDB Vector Store
+    CHROMA_DB_DIR: str = "chroma_db"
+    CHROMA_COLLECTION_NAME: str = "meeting_documents"
 
     # File Upload Configuration
     UPLOADS_DIR: str = "uploads"
