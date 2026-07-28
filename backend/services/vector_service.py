@@ -80,11 +80,12 @@ class VectorService:
                 f"Ollama embedding service is unreachable. Please verify Ollama is running and model '{self.embed_model}' is pulled."
             ) from exc
 
-    def store_chunks(self, filename: str, chunks: List[Dict[str, Any]]) -> int:
+    def store_chunks(self, document_id: str, filename: str, chunks: List[Dict[str, Any]]) -> int:
         """
         Generates embeddings and stores text chunks in ChromaDB vector collection.
 
         Args:
+            document_id (str): Unique document identifier.
             filename (str): Name of the source transcript file.
             chunks (List[Dict[str, Any]]): List of chunk objects.
 
@@ -92,10 +93,10 @@ class VectorService:
             int: Count of vectors successfully stored.
         """
         if not chunks:
-            logger.warning(f"No chunks provided to store for file '{filename}'.")
+            logger.warning(f"No chunks provided to store for document '{document_id}' (filename: '{filename}').")
             return 0
 
-        logger.info(f"Generating embeddings and storing {len(chunks)} chunks for file '{filename}'...")
+        logger.info(f"Generating embeddings and storing {len(chunks)} chunks for document '{document_id}'...")
         timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
         ids: List[str] = []
@@ -105,22 +106,24 @@ class VectorService:
 
         for idx, chunk in enumerate(chunks):
             chunk_num = chunk.get("chunk_number", idx + 1)
-            chunk_text = chunk.get("text", "")
+            chunk_text = chunk.get("chunk_text", "")
 
             # Generate vector embedding via Ollama
             emb_vector = self.generate_embedding(chunk_text)
 
-            chunk_id = f"{filename}_chunk_{chunk_num}"
+            chunk_id = f"{document_id}_chunk_{chunk_num}"
             ids.append(chunk_id)
             documents.append(chunk_text)
             embeddings.append(emb_vector)
             metadatas.append({
+                "document_id": document_id,
                 "filename": filename,
                 "chunk_number": chunk_num,
-                "upload_timestamp": timestamp
+                "upload_timestamp": timestamp,
+                "chunk_text": chunk_text
             })
 
-            logger.debug(f"Embeddings generated for chunk {chunk_num}/{len(chunks)} of '{filename}'.")
+            logger.debug(f"Embeddings generated for chunk {chunk_num}/{len(chunks)} of document '{document_id}'.")
 
         # Upsert into ChromaDB
         self.collection.upsert(
@@ -130,16 +133,16 @@ class VectorService:
             metadatas=metadatas
         )
 
-        logger.info(f"Vectors stored successfully for file '{filename}' ({len(ids)} vectors total).")
+        logger.info(f"Vectors stored successfully for document '{document_id}' ({len(ids)} vectors total).")
         return len(ids)
 
-    def similarity_search(self, query_text: str, filename: Optional[str] = None, top_k: int = 4) -> List[Dict[str, Any]]:
+    def similarity_search(self, query_text: str, document_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """
-        Performs vector similarity search against ChromaDB.
+        Performs vector similarity search against ChromaDB filtered by document_id.
 
         Args:
             query_text (str): User question / query string.
-            filename (Optional[str]): Optional filter by specific transcript filename.
+            document_id (str): Document ID to filter search.
             top_k (int): Number of top matches to retrieve.
 
         Returns:
@@ -148,7 +151,7 @@ class VectorService:
         logger.info(f"Generating embedding for similarity query: '{query_text[:50]}...'")
         query_embedding = self.generate_embedding(query_text)
 
-        where_filter = {"filename": filename} if filename else None
+        where_filter = {"document_id": document_id}
 
         results = self.collection.query(
             query_embeddings=[query_embedding],
@@ -164,7 +167,8 @@ class VectorService:
 
             for doc, meta, dist in zip(docs, metas, distances):
                 matches.append({
-                    "text": doc,
+                    "chunk_text": doc,
+                    "document_id": meta.get("document_id", ""),
                     "filename": meta.get("filename", "unknown"),
                     "chunk_number": meta.get("chunk_number", 0),
                     "upload_timestamp": meta.get("upload_timestamp", ""),
@@ -173,3 +177,15 @@ class VectorService:
 
         logger.info(f"Retrieval complete: Found {len(matches)} matching vector chunks.")
         return matches
+
+    def delete_document(self, document_id: str) -> None:
+        """
+        Deletes all chunks associated with a document_id from the collection.
+
+        Args:
+            document_id (str): Document ID to delete.
+        """
+        logger.info(f"Deleting all vectors for document_id '{document_id}'...")
+        self.collection.delete(where={"document_id": document_id})
+        logger.info(f"Successfully deleted document_id '{document_id}' from vector store.")
+

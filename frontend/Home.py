@@ -46,11 +46,12 @@ def upload_file_to_backend(uploaded_file) -> dict:
         raise RuntimeError(f"Upload failed (HTTP {response.status_code}): {detail}")
 
 
-def index_file_in_chromadb(filename: str) -> dict:
+def index_file_in_chromadb(uploaded_file) -> dict:
     """Triggers backend POST /chat/upload to index transcript into ChromaDB."""
     url = f"{BACKEND_URL}/chat/upload"
-    response = requests.post(url, json={"filename": filename}, timeout=120)
-    if response.status_code == 200:
+    files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
+    response = requests.post(url, files=files, timeout=120)
+    if response.status_code in (200, 201):
         return response.json()
     else:
         try:
@@ -58,6 +59,7 @@ def index_file_in_chromadb(filename: str) -> dict:
         except Exception:
             detail = response.text
         raise RuntimeError(f"ChromaDB Indexing failed (HTTP {response.status_code}): {detail}")
+
 
 
 def request_summary_from_backend(filename: str = None, transcript_text: str = None) -> dict:
@@ -80,12 +82,10 @@ def request_summary_from_backend(filename: str = None, transcript_text: str = No
         raise RuntimeError(f"Summarization failed (HTTP {response.status_code}): {detail}")
 
 
-def send_chat_query(question: str, filename: str = None) -> dict:
+def send_chat_query(question: str, document_id: str) -> dict:
     """Sends a question to backend POST /chat/query for RAG answer."""
     url = f"{BACKEND_URL}/chat/query"
-    payload = {"question": question}
-    if filename:
-        payload["filename"] = filename
+    payload = {"question": question, "document_id": document_id}
 
     response = requests.post(url, json=payload, timeout=90)
     if response.status_code == 200:
@@ -98,12 +98,15 @@ def send_chat_query(question: str, filename: str = None) -> dict:
         raise RuntimeError(f"Chat query failed (HTTP {response.status_code}): {detail}")
 
 
+
 def render_ui() -> None:
     """Main Streamlit UI renderer."""
 
     # Session State Initialization
     if "upload_info" not in st.session_state:
         st.session_state.upload_info = None
+    if "document_id" not in st.session_state:
+        st.session_state.document_id = None
     if "summary_data" not in st.session_state:
         st.session_state.summary_data = None
     if "chat_indexed" not in st.session_state:
@@ -219,7 +222,9 @@ def render_ui() -> None:
 
     if process_btn and uploaded_file is not None:
         st.session_state.error_message = None
+
         st.session_state.summary_data = None
+        st.session_state.document_id = None
         st.session_state.chat_indexed = False
         st.session_state.chat_history = []
 
@@ -236,9 +241,10 @@ def render_ui() -> None:
         if st.session_state.upload_info and not st.session_state.error_message:
             with st.spinner("Step 2/3: Generating embeddings (nomic-embed-text) & indexing into ChromaDB..."):
                 try:
-                    chroma_res = index_file_in_chromadb(st.session_state.upload_info["filename"])
+                    chroma_res = index_file_in_chromadb(uploaded_file)
+                    st.session_state.document_id = chroma_res.get("document_id")
                     st.session_state.chat_indexed = True
-                    st.toast(f"🧠 Indexed {chroma_res['vectors_stored']} vectors into ChromaDB!", icon="⚡")
+                    st.toast(f"🧠 Indexed {chroma_res['number_of_chunks']} chunks into ChromaDB!", icon="⚡")
                 except Exception as exc:
                     st.session_state.error_message = f"ChromaDB Indexing Error: {str(exc)}"
 
@@ -251,6 +257,7 @@ def render_ui() -> None:
                     st.toast("🎉 Meeting processing complete!", icon="🤖")
                 except Exception as exc:
                     st.session_state.error_message = f"Summarization Error: {str(exc)}"
+
 
     if st.session_state.error_message:
         st.error(st.session_state.error_message)
@@ -343,28 +350,30 @@ def render_ui() -> None:
 
             # Generate response from backend
             with st.chat_message("assistant"):
-                with st.spinner("Searching ChromaDB & synthesizing answer with Ollama..."):
-                    try:
-                        active_filename = st.session_state.upload_info["filename"] if st.session_state.upload_info else None
-                        res = send_chat_query(question=active_prompt, filename=active_filename)
-                        answer_text = res.get("answer", "No answer generated.")
-                        sources_list = res.get("sources", [])
+                if not st.session_state.document_id:
+                    st.error("No active document indexed for chat. Please upload and index a document first.")
+                else:
+                    with st.spinner("Searching ChromaDB & synthesizing answer with Ollama..."):
+                        try:
+                            res = send_chat_query(question=active_prompt, document_id=st.session_state.document_id)
+                            answer_text = res.get("answer", "No answer generated.")
+                            sources_list = res.get("sources", [])
 
-                        st.write(answer_text)
-                        if sources_list:
-                            with st.expander("📌 Retrieved Vector Sources"):
-                                for s_idx, src in enumerate(sources_list, 1):
-                                    st.markdown(f"**Chunk #{src.get('chunk_number', s_idx)}** (`{src.get('filename')}`):")
-                                    st.caption(src.get("text"))
+                            st.write(answer_text)
+                            if sources_list:
+                                with st.expander("📌 Retrieved Vector Sources"):
+                                    for s_idx, src in enumerate(sources_list, 1):
+                                        st.markdown(f"**Chunk #{src.get('chunk_number', s_idx)}** (`{src.get('filename')}`):")
+                                        st.caption(f"Source file: {src.get('filename')} | Chunk: {src.get('chunk_number')}")
 
-                        # Save to history
-                        st.session_state.chat_history.append({
-                            "role": "assistant",
-                            "content": answer_text,
-                            "sources": sources_list
-                        })
-                    except Exception as exc:
-                        st.error(f"Chat Error: {str(exc)}")
+                            # Save to history
+                            st.session_state.chat_history.append({
+                                "role": "assistant",
+                                "content": answer_text,
+                                "sources": sources_list
+                            })
+                        except Exception as exc:
+                            st.error(f"Chat Error: {str(exc)}")
 
     # --- TAB 3: ACTION ITEMS ---
     with tab_action_items:

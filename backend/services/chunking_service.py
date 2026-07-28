@@ -54,7 +54,7 @@ class ChunkingService:
             if chunk_str:
                 chunks.append({
                     "chunk_number": chunk_number,
-                    "text": chunk_str,
+                    "chunk_text": chunk_str,
                     "char_start": start,
                     "char_end": end
                 })
@@ -67,3 +67,4 @@ class ChunkingService:
 
         logger.info(f"Created {len(chunks)} chunks from transcript ({total_len} characters).")
         return chunks
+
