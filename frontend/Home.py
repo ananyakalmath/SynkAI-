@@ -95,7 +95,7 @@ def go(route: str) -> None:
 
 def _render_sidebar() -> None:
     """
-    Renders the charcoal sidebar: brand, navigation, and the user block at the bottom.
+    Renders the charcoal sidebar: brand, navigation, and clickable user profile.
     """
     with st.sidebar:
         st.markdown(
@@ -111,6 +111,7 @@ def _render_sidebar() -> None:
         for route, label, _ in NAV_ITEMS:
             is_active = st.session_state.route == route
             wrapper = st.container(key=f"navwrap_{route}")
+
             if is_active:
                 st.markdown(
                     f"""
@@ -123,6 +124,7 @@ def _render_sidebar() -> None:
                     """,
                     unsafe_allow_html=True,
                 )
+
             with wrapper:
                 if st.button(
                     label,
@@ -139,24 +141,86 @@ def _render_sidebar() -> None:
         online = api.is_backend_online()
         dot = "#9CB89C" if online else "#C79B93"
         state = "Backend online" if online else "Backend offline"
-        initials = "".join(part[0] for part in USER_NAME.split()[:2]).upper()
 
+        initials = "".join(
+            part[0] for part in USER_NAME.split()[:2]
+        ).upper()
+
+        # Clickable profile menu
         st.markdown(
-            f"""
-            <div class="sk-user">
-              <div class="sk-avatar">{ui.esc(initials)}</div>
-              <div>
-                <p class="sk-user-name">{ui.esc(USER_NAME)}</p>
-                <p class="sk-user-tag">{ui.esc(USER_TAGLINE)}</p>
-              </div>
-            </div>
-            <div class="sk-status" style="margin-top:.9rem">
-              <span class="sk-status-dot" style="background:{dot}"></span>{ui.esc(state)}
-            </div>
+            """
+            <style>
+            [data-testid="stSidebar"] .st-key-profile_menu button {
+                border: none;
+                background: transparent;
+                padding: 0.35rem 0.25rem;
+                width: 100%;
+                justify-content: flex-start;
+            }
+
+            [data-testid="stSidebar"] .st-key-profile_menu button:hover {
+                background: rgba(255, 255, 255, 0.08);
+            }
+            </style>
             """,
             unsafe_allow_html=True,
         )
 
+        with st.container(key="profile_menu"):
+            with st.popover(
+                f"{USER_NAME} — {USER_TAGLINE}",
+                use_container_width=True,
+            ):
+                st.markdown(
+                    f"""
+                    <div style="
+                        padding: 0.2rem 0 0.7rem 0;
+                        border-bottom: 1px solid rgba(255,255,255,0.12);
+                        margin-bottom: 0.5rem;
+                    ">
+                        <div style="
+                            font-size: 1rem;
+                            font-weight: 600;
+                        ">
+                            {ui.esc(USER_NAME)}
+                        </div>
+                        <div style="
+                            font-size: 0.78rem;
+                            opacity: 0.65;
+                            margin-top: 0.15rem;
+                        ">
+                            {ui.esc(USER_TAGLINE)}
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if st.button("Profile", key="profile_item", use_container_width=True):
+                    st.session_state.notice = "Profile"
+                    st.rerun()
+
+                if st.button("Workspace", key="workspace_item", use_container_width=True):
+                    st.session_state.notice = "Workspace"
+                    st.rerun()
+
+                if st.button("Settings", key="profile_settings_item", use_container_width=True):
+                    go("settings")
+                    st.rerun()
+
+                if st.button("Sign out", key="signout_item", use_container_width=True):
+                    st.session_state.notice = "Sign out is not configured yet."
+
+        # Backend status
+        st.markdown(
+            f"""
+            <div class="sk-status" style="margin-top:.9rem">
+              <span class="sk-status-dot" style="background:{dot}"></span>
+              {ui.esc(state)}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 def main() -> None:
     """
