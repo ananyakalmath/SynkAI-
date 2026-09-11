@@ -1,0 +1,22 @@
+# SynkAI theme.
+# Setting the palette here means native Streamlit widgets (selects, inputs, chat input,
+# dropzones) inherit the warm ivory / charcoal system instead of Streamlit's default
+# blue-grey secondary surfaces.
+
+[theme]
+base = "light"
+primaryColor = "#4A4A4A"
+backgroundColor = "#FAF8F5"
+secondaryBackgroundColor = "#F3EFE9"
+textColor = "#2E2E2C"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+showSidebarNavigation = false
+
+[server]
+runOnSave = true
+
+[browser]
+gatherUsageStats = false
