@@ -47,6 +47,27 @@ def render(go):
 
         st.markdown("<br>", unsafe_allow_html=True)
 
+        st.markdown(
+    """
+    <style>
+    div[data-testid="stButton"] button[kind="primary"] {
+        border-radius: 10px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+    }
+
+    div[data-testid="stButton"] button[kind="primary"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 7px 18px rgba(0, 0, 0, 0.20);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+        
+
         if st.button(
             "Log in",
             use_container_width=True,
