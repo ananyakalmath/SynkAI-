@@ -67,6 +67,7 @@ class SummaryService:
             prompt=prompt,
             system_prompt=SYSTEM_PROMPT,
             json_format=True,
+            label="summary_service",
         )
 
         parsed_data = self._parse_llm_json(raw_output)

@@ -3,6 +3,7 @@ Meeting Summarization Route Handler for SynkAI.
 Handles POST /summarize endpoint via Ollama LLM.
 """
 
+import asyncio
 import os
 from fastapi import APIRouter, HTTPException, status
 from backend.config import settings
@@ -66,9 +67,11 @@ async def generate_meeting_summary(request: SummaryRequest) -> SummaryResponse:
     logger.info(f"Generating summary for transcript (filename: '{target_filename}')...")
 
     try:
-        summary_response = summary_service.generate_summary(
-            transcript_text=transcript_content,
-            filename=target_filename
+        # Blocking Ollama call: run off the event loop so other requests stay responsive.
+        summary_response = await asyncio.to_thread(
+            summary_service.generate_summary,
+            transcript_content,
+            target_filename
         )
         return summary_response
 

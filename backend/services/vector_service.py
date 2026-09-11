@@ -11,6 +11,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from backend.config import settings
+from backend.services.ollama_gate import ollama_gate
 from backend.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -44,6 +45,9 @@ class VectorService:
         """
         Generates embedding vector for text using Ollama /api/embeddings.
 
+        Embedding requests share the process-wide Ollama gate with LLM generation, so
+        indexing a document never competes with a running agent workflow for local inference.
+
         Args:
             text (str): Input text chunk.
 
@@ -51,18 +55,27 @@ class VectorService:
             List[float]: High-dimensional embedding vector.
         """
         endpoint = f"{self.ollama_url}/api/embeddings"
+        # A short keep_alive means the small embedding model does not sit in memory
+        # competing with the (much larger) LLM during a multi-agent analysis run.
         payload = {
             "model": self.embed_model,
-            "prompt": text
+            "prompt": text,
+            "keep_alive": settings.OLLAMA_EMBED_KEEP_ALIVE
         }
+        timeout = settings.OLLAMA_EMBED_TIMEOUT
 
         try:
-            response = requests.post(endpoint, json=payload, timeout=30)
-            if response.status_code != 200:
-                # Try fallback endpoint /api/embed if /api/embeddings fails
-                fallback_endpoint = f"{self.ollama_url}/api/embed"
-                fallback_payload = {"model": self.embed_model, "input": text}
-                response = requests.post(fallback_endpoint, json=fallback_payload, timeout=30)
+            with ollama_gate.slot(f"embed:{self.embed_model}"):
+                response = requests.post(endpoint, json=payload, timeout=timeout)
+                if response.status_code != 200:
+                    # Try fallback endpoint /api/embed if /api/embeddings fails
+                    fallback_endpoint = f"{self.ollama_url}/api/embed"
+                    fallback_payload = {
+                        "model": self.embed_model,
+                        "input": text,
+                        "keep_alive": settings.OLLAMA_EMBED_KEEP_ALIVE
+                    }
+                    response = requests.post(fallback_endpoint, json=fallback_payload, timeout=timeout)
 
             if response.status_code != 200:
                 raise RuntimeError(f"Ollama embedding request failed HTTP {response.status_code}: {response.text}")

@@ -4,6 +4,7 @@ Handles POST /chat/upload for uploading and indexing transcripts,
 and POST /chat/query for Q&A retrieval.
 """
 
+import asyncio
 import os
 import shutil
 import uuid
@@ -115,10 +116,12 @@ async def index_transcript_for_chat(file: UploadFile = File(...)) -> ChatUploadR
     # Generate embeddings and store in ChromaDB
     logger.info("Embeddings generated & vectors stored starting...")
     try:
-        vector_service.store_chunks(
-            document_id=document_id,
-            filename=safe_filename,
-            chunks=chunks
+        # Embedding generation is blocking and gated; keep it off the event loop.
+        await asyncio.to_thread(
+            vector_service.store_chunks,
+            document_id,
+            safe_filename,
+            chunks
         )
     except ConnectionError as exc:
         logger.error(f"Ollama connection failure during vector storage: {exc}")
@@ -169,9 +172,11 @@ async def query_transcript_chat(request: ChatQueryRequest) -> ChatQueryResponse:
     logger.info(f"Query received for document_id '{request.document_id}'.")
 
     try:
-        rag_result = retrieval_service.answer_question(
-            document_id=request.document_id,
-            question=request.question
+        # Blocking retrieval + Ollama call: run off the event loop.
+        rag_result = await asyncio.to_thread(
+            retrieval_service.answer_question,
+            request.document_id,
+            request.question
         )
         logger.info("Retrieval completed and answer generated.")
 

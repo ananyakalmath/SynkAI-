@@ -95,7 +95,8 @@ Question:
         answer = self.ollama_service.generate(
             prompt=prompt,
             system_prompt=RAG_SYSTEM_PROMPT,
-            json_format=False
+            json_format=False,
+            label="rag_chat"
         )
 
         logger.info("RAG response generated successfully.")

@@ -121,10 +121,59 @@ streamlit run frontend/Home.py
 
 ---
 
-## 🧪 Running Automated Tests
+## 🧠 Sprint 4: Multi-Agent Meeting Intelligence
 
-Run Pytest to verify health routes, file parser service, and upload endpoints:
+`POST /meeting/analyze` runs a LangGraph workflow over a transcript and returns structured
+meeting intelligence. Accepts either `document_id` (a transcript already indexed through
+`POST /chat/upload`) or raw `transcript_text`.
 
 ```bash
-pytest tests/
+curl -X POST http://localhost:8000/meeting/analyze \
+  -H 'Content-Type: application/json' \
+  -d '{"transcript_text": "Sarah: Mike will finish the LangGraph workflow by Wednesday."}'
+```
+
+The agents run as a **sequential chain**, one at a time:
+
+```text
+parser -> summary -> action_item -> decision -> deadline -> risk -> coordinator
+```
+
+- **Parser Agent** normalizes the transcript deterministically in Python (no LLM call).
+- The five extraction agents each make exactly one `qwen3` call.
+- **Coordinator Agent** assembles the validated response.
+
+A failing agent is reported, never hidden: the response carries `analysis_complete: false`
+and an `agent_errors` list. If the parser fails, or every extraction agent fails, the
+endpoint returns HTTP 500 instead of an empty-looking success.
+
+### Local Ollama throughput settings
+
+Local Ollama serves one generation at a time, so these settings (see `.env`) keep the
+workflow within what the machine can actually do:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `OLLAMA_MAX_CONCURRENCY` | `1` | In-flight Ollama requests allowed per process (LLM + embeddings share the limit) |
+| `OLLAMA_QUEUE_TIMEOUT` | `600` | Max seconds a caller waits for a free inference slot |
+| `OLLAMA_TIMEOUT` | `120` | **Stall** timeout: max seconds without a streamed token |
+| `OLLAMA_MAX_DURATION` | `900` | Hard wall-clock cap for a single generation |
+| `OLLAMA_KEEP_ALIVE` | `10m` | Keeps the LLM resident across agents (no reload per agent) |
+| `OLLAMA_EMBED_KEEP_ALIVE` | `60s` | Frees embedding-model memory for the LLM |
+| `OLLAMA_ENABLE_THINKING` | `False` | qwen3 thinking mode measured ~16x slower for no gain here |
+| `OLLAMA_NUM_PREDICT` | `768` | Cap on generated tokens per call |
+
+On a memory-constrained machine (e.g. 8 GB RAM, where `qwen3:8b` barely fits and swaps),
+the whole analysis can take several minutes. Point `OLLAMA_MODEL` at a smaller model
+(`qwen3:1.7b`, `qwen2.5:7b-instruct`) for faster runs.
+
+---
+
+## 🧪 Running Automated Tests
+
+Run Pytest to verify health routes, file parser service, upload endpoints, the RAG
+pipeline, and the multi-agent workflow:
+
+```bash
+PYTHONPATH=. pytest tests/
 ```

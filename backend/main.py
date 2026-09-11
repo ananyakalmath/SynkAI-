@@ -15,7 +15,9 @@ from backend.routes.health import router as health_router
 from backend.routes.upload import router as upload_router
 from backend.routes.summary import router as summary_router
 from backend.routes.chat import router as chat_router
+from backend.routes.analysis import router as analysis_router
 from backend.utils.logger import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -60,6 +62,8 @@ def create_app() -> FastAPI:
     app.include_router(upload_router, tags=["Upload"])
     app.include_router(summary_router, tags=["Summarization"])
     app.include_router(chat_router, tags=["RAG Chat"])
+    app.include_router(analysis_router, tags=["Analysis"])
+
 
     # Global unhandled exception handler
     @app.exception_handler(Exception)
