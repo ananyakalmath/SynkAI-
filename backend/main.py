@@ -17,6 +17,7 @@ from backend.routes.summary import router as summary_router
 from backend.routes.chat import router as chat_router
 from backend.routes.analysis import router as analysis_router
 from backend.routes.meetings import router as meetings_router
+from backend.routes.auth import router as auth_router
 from backend.utils.logger import get_logger
 
 
@@ -65,6 +66,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_router, tags=["RAG Chat"])
     app.include_router(analysis_router, tags=["Analysis"])
     app.include_router(meetings_router, tags=["Meetings"])
+    app.include_router(auth_router, tags=["Authentication"])
 
 
     # Global unhandled exception handler

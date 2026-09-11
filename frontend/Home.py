@@ -22,11 +22,16 @@ from frontend.views import analysis as analysis_view  # noqa: E402
 from frontend.views import chat as chat_view  # noqa: E402
 from frontend.views import history as history_view  # noqa: E402
 from frontend.views import home as home_view  # noqa: E402
+from frontend.views import login as login_view  # noqa: E402
+from frontend.views import profile as profile_view  # noqa: E402
 from frontend.views import settings as settings_view  # noqa: E402
+from frontend.views import signup as signup_view  # noqa: E402
 from frontend.views import upload as upload_view  # noqa: E402
+
 
 USER_NAME = os.getenv("SYNKAI_USER_NAME", "Ananya Kalmath")
 USER_TAGLINE = os.getenv("SYNKAI_USER_TAGLINE", "Workspace owner")
+
 
 NAV_ITEMS = [
     ("home", "Home", home_view.render),
@@ -36,6 +41,7 @@ NAV_ITEMS = [
     ("history", "History", history_view.render),
     ("settings", "Settings", settings_view.render),
 ]
+
 
 st.set_page_config(
     page_title="SynkAI — Meetings, made meaningful",
@@ -50,8 +56,16 @@ def _init_state() -> None:
     Seeds the session state keys shared across views, and adopts the most recently
     indexed meeting so Chat and Analysis are usable straight away.
     """
+
     defaults = {
-        "route": "home",
+        "route": "login",
+
+        # Authentication
+        "logged_in": False,
+        "auth_token": None,
+        "user": None,
+
+        # Meeting/application state
         "active_document_id": None,
         "active_filename": None,
         "summary_data": None,
@@ -64,6 +78,7 @@ def _init_state() -> None:
         "notice": None,
         "bootstrapped": False,
     }
+
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
@@ -71,13 +86,18 @@ def _init_state() -> None:
         return
 
     st.session_state.bootstrapped = True
+
+    # Do not load meeting history while the user is on the authentication screen.
+    if not st.session_state.logged_in:
+        return
+
     meetings = store.merge_with_backend(api.list_meetings())
+
     if not meetings:
         return
 
-    # Only the active meeting is adopted. Stored summaries stay out of session state so
-    # the Upload page never shows an older summary as if it were the current result;
-    # views that want history read the store directly or are opened from History.
+    # Only the active meeting is adopted. Stored summaries stay out of session state
+    # so the Upload page never shows an older summary as if it were the current result.
     latest = meetings[0]
     st.session_state.active_document_id = latest.get("document_id")
     st.session_state.active_filename = latest.get("filename")
@@ -97,6 +117,7 @@ def _render_sidebar() -> None:
     """
     Renders the charcoal sidebar: brand, navigation, and clickable user profile.
     """
+
     with st.sidebar:
         st.markdown(
             """
@@ -105,11 +126,17 @@ def _render_sidebar() -> None:
             """,
             unsafe_allow_html=True,
         )
+
         ui.spacer(1.6)
-        st.markdown("<p class='sk-nav-label'>Workspace</p>", unsafe_allow_html=True)
+
+        st.markdown(
+            "<p class='sk-nav-label'>Workspace</p>",
+            unsafe_allow_html=True,
+        )
 
         for route, label, _ in NAV_ITEMS:
             is_active = st.session_state.route == route
+
             wrapper = st.container(key=f"navwrap_{route}")
 
             if is_active:
@@ -136,80 +163,27 @@ def _render_sidebar() -> None:
                     st.rerun()
 
         ui.spacer(0.6)
+
         st.markdown("<hr/>", unsafe_allow_html=True)
 
         online = api.is_backend_online()
+
         dot = "#9CB89C" if online else "#C79B93"
         state = "Backend online" if online else "Backend offline"
 
-        initials = "".join(
-            part[0] for part in USER_NAME.split()[:2]
-        ).upper()
+        # Get the currently authenticated user's information.
+        user = st.session_state.get("user") or {}
 
-        # Clickable profile menu
-        st.markdown(
-            """
-            <style>
-            [data-testid="stSidebar"] .st-key-profile_menu button {
-                border: none;
-                background: transparent;
-                padding: 0.35rem 0.25rem;
-                width: 100%;
-                justify-content: flex-start;
-            }
+        current_name = user.get("name") or USER_NAME
+        current_role = user.get("role") or USER_TAGLINE
 
-            [data-testid="stSidebar"] .st-key-profile_menu button:hover {
-                background: rgba(255, 255, 255, 0.08);
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        with st.container(key="profile_menu"):
-            with st.popover(
-                f"{USER_NAME} — {USER_TAGLINE}",
-                use_container_width=True,
-            ):
-                st.markdown(
-                    f"""
-                    <div style="
-                        padding: 0.2rem 0 0.7rem 0;
-                        border-bottom: 1px solid rgba(255,255,255,0.12);
-                        margin-bottom: 0.5rem;
-                    ">
-                        <div style="
-                            font-size: 1rem;
-                            font-weight: 600;
-                        ">
-                            {ui.esc(USER_NAME)}
-                        </div>
-                        <div style="
-                            font-size: 0.78rem;
-                            opacity: 0.65;
-                            margin-top: 0.15rem;
-                        ">
-                            {ui.esc(USER_TAGLINE)}
-                        </div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-                if st.button("Profile", key="profile_item", use_container_width=True):
-                    st.session_state.notice = "Profile"
-                    st.rerun()
-
-                if st.button("Workspace", key="workspace_item", use_container_width=True):
-                    st.session_state.notice = "Workspace"
-                    st.rerun()
-
-                if st.button("Settings", key="profile_settings_item", use_container_width=True):
-                    go("settings")
-                    st.rerun()
-
-                if st.button("Sign out", key="signout_item", use_container_width=True):
-                    st.session_state.notice = "Sign out is not configured yet."
+        if st.button(
+            f"{current_name}  ·  {current_role}",
+            key="profile_button",
+            use_container_width=True,
+        ):
+            go("profile")
+            st.rerun()
 
         # Backend status
         st.markdown(
@@ -222,16 +196,52 @@ def _render_sidebar() -> None:
             unsafe_allow_html=True,
         )
 
+
 def main() -> None:
     """
     Renders the application.
     """
+
     _init_state()
     apply_theme()
+
+    # ---------------------------------------------------------
+    # AUTHENTICATION
+    # ---------------------------------------------------------
+    # Users must log in or create an account before seeing
+    # the actual SynkAI workspace.
+    if not st.session_state.logged_in:
+
+        auth_routes = {
+            "login": login_view.render,
+            "signup": signup_view.render,
+        }
+
+        renderer = auth_routes.get(
+            st.session_state.route,
+            login_view.render,
+        )
+
+        renderer(go)
+        return
+
+    # ---------------------------------------------------------
+    # MAIN APPLICATION
+    # ---------------------------------------------------------
     _render_sidebar()
 
-    routes = {route: renderer for route, _, renderer in NAV_ITEMS}
-    renderer = routes.get(st.session_state.route, home_view.render)
+    routes = {
+        route: renderer
+        for route, _, renderer in NAV_ITEMS
+    }
+
+    routes["profile"] = profile_view.render
+
+    renderer = routes.get(
+        st.session_state.route,
+        home_view.render,
+    )
+
     renderer(go)
 
 

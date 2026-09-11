@@ -1,16 +1,14 @@
 """
 Backend client for the SynkAI frontend.
 
-A thin wrapper over the existing FastAPI endpoints — request and response shapes are
-unchanged from Sprints 1-4:
-
-    GET  /health
-    GET  /meetings
-    POST /upload
-    POST /summarize
-    POST /chat/upload
-    POST /chat/query
-    POST /meeting/analyze
+Handles communication with the FastAPI backend, including:
+- Meetings
+- Uploads
+- Summaries
+- RAG chat
+- Meeting analysis
+- Authentication
+- User profiles
 """
 
 import os
@@ -18,9 +16,13 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000").rstrip("/")
 
-# Local inference is slow, so timeouts are per-operation rather than one global value.
+BACKEND_URL = os.getenv(
+    "BACKEND_URL",
+    "http://localhost:8000",
+).rstrip("/")
+
+
 HEALTH_TIMEOUT = 3
 LIST_TIMEOUT = 15
 UPLOAD_TIMEOUT = 60
@@ -28,6 +30,7 @@ INDEX_TIMEOUT = int(os.getenv("INDEX_TIMEOUT_SECONDS", "600"))
 SUMMARY_TIMEOUT = int(os.getenv("SUMMARY_TIMEOUT_SECONDS", "900"))
 CHAT_TIMEOUT = int(os.getenv("CHAT_TIMEOUT_SECONDS", "900"))
 ANALYSIS_TIMEOUT = int(os.getenv("ANALYSIS_TIMEOUT_SECONDS", "1800"))
+AUTH_TIMEOUT = 15
 
 
 class BackendError(RuntimeError):
@@ -35,54 +38,51 @@ class BackendError(RuntimeError):
 
 
 def _detail(response: requests.Response) -> str:
-    """
-    Extracts the most useful error message from a failed response.
+    """Extract the most useful error message from a failed response."""
 
-    Args:
-        response (requests.Response): Failed HTTP response.
-
-    Returns:
-        str: Error detail text.
-    """
     try:
         payload = response.json()
     except Exception:
         return response.text or f"HTTP {response.status_code}"
 
     detail = payload.get("detail", payload) if isinstance(payload, dict) else payload
+
     if isinstance(detail, list) and detail:
         first = detail[0]
+
         if isinstance(first, dict):
             return first.get("msg", str(first))
+
     return str(detail)
 
 
-def _request(method: str, path: str, timeout: int, **kwargs: Any) -> Dict[str, Any]:
-    """
-    Issues an HTTP request to the backend and returns the decoded JSON body.
+def _request(
+    method: str,
+    path: str,
+    timeout: int,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Send an HTTP request to the backend."""
 
-    Args:
-        method (str): HTTP verb.
-        path (str): Endpoint path beginning with "/".
-        timeout (int): Read timeout in seconds.
-        **kwargs: Passed through to `requests.request`.
-
-    Returns:
-        Dict[str, Any]: Decoded response body.
-
-    Raises:
-        BackendError: On connection failure or a non-2xx response.
-    """
     url = f"{BACKEND_URL}{path}"
+
     try:
-        response = requests.request(method, url, timeout=timeout, **kwargs)
+        response = requests.request(
+            method,
+            url,
+            timeout=timeout,
+            **kwargs,
+        )
+
     except requests.exceptions.Timeout as exc:
         raise BackendError(
-            f"The request to {path} timed out after {timeout}s. Local inference may still be running."
+            f"The request to {path} timed out after {timeout}s."
         ) from exc
+
     except requests.exceptions.RequestException as exc:
         raise BackendError(
-            f"Could not reach the SynkAI backend at {BACKEND_URL}. Is it running?"
+            f"Could not reach the SynkAI backend at {BACKEND_URL}. "
+            "Is it running?"
         ) from exc
 
     if response.status_code >= 400:
@@ -94,116 +94,259 @@ def _request(method: str, path: str, timeout: int, **kwargs: Any) -> Dict[str, A
     return response.json()
 
 
-def is_backend_online() -> bool:
-    """
-    Checks whether the backend answers the health endpoint.
+# ============================================================
+# HEALTH
+# ============================================================
 
-    Returns:
-        bool: True when the backend reports "ok".
-    """
+def is_backend_online() -> bool:
+    """Check whether the backend is online."""
+
     try:
-        payload = _request("GET", "/health", HEALTH_TIMEOUT)
+        payload = _request(
+            "GET",
+            "/health",
+            HEALTH_TIMEOUT,
+        )
+
     except BackendError:
         return False
+
     return payload.get("status") == "ok"
 
 
-def list_meetings() -> List[Dict[str, Any]]:
-    """
-    Fetches meetings already indexed in the vector store.
+# ============================================================
+# MEETINGS
+# ============================================================
 
-    Returns:
-        List[Dict[str, Any]]: Meeting records, newest first. Empty when unavailable.
-    """
+def list_meetings() -> List[Dict[str, Any]]:
+    """Fetch meetings already indexed in the vector store."""
+
     try:
-        payload = _request("GET", "/meetings", LIST_TIMEOUT)
+        payload = _request(
+            "GET",
+            "/meetings",
+            LIST_TIMEOUT,
+        )
+
     except BackendError:
         return []
+
     return payload.get("meetings", [])
 
 
-def upload_transcript(filename: str, data: bytes, content_type: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Saves and parses a transcript via POST /upload.
+# ============================================================
+# UPLOAD
+# ============================================================
 
-    Args:
-        filename (str): Original file name.
-        data (bytes): File contents.
-        content_type (Optional[str]): MIME type reported by the browser.
+def upload_transcript(
+    filename: str,
+    data: bytes,
+    content_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Upload and parse a meeting transcript."""
 
-    Returns:
-        Dict[str, Any]: UploadResponse payload.
-    """
-    files = {"file": (filename, data, content_type or "application/octet-stream")}
-    return _request("POST", "/upload", UPLOAD_TIMEOUT, files=files)
+    files = {
+        "file": (
+            filename,
+            data,
+            content_type or "application/octet-stream",
+        )
+    }
 
-
-def index_transcript(filename: str, data: bytes, content_type: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Chunks, embeds and indexes a transcript via POST /chat/upload.
-
-    Args:
-        filename (str): Original file name.
-        data (bytes): File contents.
-        content_type (Optional[str]): MIME type reported by the browser.
-
-    Returns:
-        Dict[str, Any]: ChatUploadResponse payload with `document_id`.
-    """
-    files = {"file": (filename, data, content_type or "application/octet-stream")}
-    return _request("POST", "/chat/upload", INDEX_TIMEOUT, files=files)
-
-
-def summarize(filename: Optional[str] = None, transcript_text: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Generates a structured summary via POST /summarize.
-
-    Args:
-        filename (Optional[str]): Name of a transcript already in uploads/.
-        transcript_text (Optional[str]): Raw transcript text instead of a file.
-
-    Returns:
-        Dict[str, Any]: SummaryResponse payload.
-    """
-    payload: Dict[str, Any] = {}
-    if filename:
-        payload["filename"] = filename
-    if transcript_text:
-        payload["transcript_text"] = transcript_text
-    return _request("POST", "/summarize", SUMMARY_TIMEOUT, json=payload)
-
-
-def ask(document_id: str, question: str) -> Dict[str, Any]:
-    """
-    Asks a question about an indexed meeting via POST /chat/query.
-
-    Args:
-        document_id (str): Document to query.
-        question (str): User question.
-
-    Returns:
-        Dict[str, Any]: ChatQueryResponse payload with `answer` and `sources`.
-    """
     return _request(
-        "POST", "/chat/query", CHAT_TIMEOUT,
-        json={"document_id": document_id, "question": question},
+        "POST",
+        "/upload",
+        UPLOAD_TIMEOUT,
+        files=files,
     )
 
 
-def analyze(document_id: Optional[str] = None, transcript_text: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Runs the multi-agent LangGraph workflow via POST /meeting/analyze.
+def index_transcript(
+    filename: str,
+    data: bytes,
+    content_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Index a transcript into ChromaDB."""
 
-    Args:
-        document_id (Optional[str]): Indexed document to analyse.
-        transcript_text (Optional[str]): Raw transcript text instead of a document.
+    files = {
+        "file": (
+            filename,
+            data,
+            content_type or "application/octet-stream",
+        )
+    }
 
-    Returns:
-        Dict[str, Any]: MeetingAnalysisResponse payload.
-    """
+    return _request(
+        "POST",
+        "/chat/upload",
+        INDEX_TIMEOUT,
+        files=files,
+    )
+
+
+# ============================================================
+# SUMMARIZATION
+# ============================================================
+
+def summarize(
+    filename: Optional[str] = None,
+    transcript_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate a structured meeting summary."""
+
     payload: Dict[str, Any] = {}
-    if document_id:
-        payload["document_id"] = document_id
+
+    if filename:
+        payload["filename"] = filename
+
     if transcript_text:
         payload["transcript_text"] = transcript_text
-    return _request("POST", "/meeting/analyze", ANALYSIS_TIMEOUT, json=payload)
+
+    return _request(
+        "POST",
+        "/summarize",
+        SUMMARY_TIMEOUT,
+        json=payload,
+    )
+
+
+# ============================================================
+# RAG CHAT
+# ============================================================
+
+def ask(
+    document_id: str,
+    question: str,
+) -> Dict[str, Any]:
+    """Ask a question about an indexed meeting."""
+
+    return _request(
+        "POST",
+        "/chat/query",
+        CHAT_TIMEOUT,
+        json={
+            "document_id": document_id,
+            "question": question,
+        },
+    )
+
+
+# ============================================================
+# ANALYSIS
+# ============================================================
+
+def analyze(
+    document_id: Optional[str] = None,
+    transcript_text: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run the multi-agent meeting analysis workflow."""
+
+    payload: Dict[str, Any] = {}
+
+    if document_id:
+        payload["document_id"] = document_id
+
+    if transcript_text:
+        payload["transcript_text"] = transcript_text
+
+    return _request(
+        "POST",
+        "/meeting/analyze",
+        ANALYSIS_TIMEOUT,
+        json=payload,
+    )
+
+
+# ============================================================
+# AUTHENTICATION
+# ============================================================
+
+def signup(
+    name: str,
+    email: str,
+    password: str,
+    workspace: str = "SynkAI",
+) -> Dict[str, Any]:
+    """Create a new SynkAI account."""
+
+    return _request(
+        "POST",
+        "/auth/signup",
+        AUTH_TIMEOUT,
+        json={
+            "name": name,
+            "email": email,
+            "password": password,
+            "workspace": workspace,
+        },
+    )
+
+
+def login(
+    email: str,
+    password: str,
+) -> Dict[str, Any]:
+    """Log an existing user into SynkAI."""
+
+    return _request(
+        "POST",
+        "/auth/login",
+        AUTH_TIMEOUT,
+        json={
+            "email": email,
+            "password": password,
+        },
+    )
+
+
+def get_profile(
+    auth_token: str,
+) -> Dict[str, Any]:
+    """Fetch the profile belonging to the logged-in user."""
+
+    return _request(
+        "GET",
+        "/auth/profile",
+        AUTH_TIMEOUT,
+        headers={
+            "X-Auth-Token": auth_token,
+        },
+    )
+
+
+def update_profile(
+    auth_token: str,
+    name: str,
+    email: str,
+    workspace: str,
+) -> Dict[str, Any]:
+    """Update and permanently save the user's profile."""
+
+    return _request(
+        "PUT",
+        "/auth/profile",
+        AUTH_TIMEOUT,
+        headers={
+            "X-Auth-Token": auth_token,
+        },
+        json={
+            "name": name,
+            "email": email,
+            "workspace": workspace,
+        },
+    )
+
+
+def logout(
+    auth_token: str,
+) -> Dict[str, Any]:
+    """Log the current user out."""
+
+    return _request(
+        "POST",
+        "/auth/logout",
+        AUTH_TIMEOUT,
+        headers={
+            "X-Auth-Token": auth_token,
+        },
+    )
