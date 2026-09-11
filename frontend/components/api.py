@@ -16,12 +16,10 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-
 BACKEND_URL = os.getenv(
     "BACKEND_URL",
-    "http://localhost:8000",
+    "http://127.0.0.1:8000",
 ).rstrip("/")
-
 
 HEALTH_TIMEOUT = 3
 LIST_TIMEOUT = 15

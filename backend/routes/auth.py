@@ -5,6 +5,7 @@ Handles user signup, login, profile updates, and logout.
 User accounts are persisted in data/users.json.
 """
 
+import asyncio
 import hashlib
 import json
 import secrets
@@ -169,17 +170,23 @@ async def signup(request: SignupRequest) -> Dict[str, Any]:
     user_id = secrets.token_hex(16)
     auth_token = secrets.token_urlsafe(32)
 
+    # Password hashing is CPU work, so run it outside the async event loop.
+    password_hash = await asyncio.to_thread(
+        _hash_password,
+        request.password,
+    )
+
     users[user_id] = {
         "id": user_id,
         "name": name,
         "email": email,
         "workspace": workspace,
         "role": "Workspace owner",
-        "password_hash": _hash_password(request.password),
+        "password_hash": password_hash,
         "auth_token": auth_token,
     }
 
-    _save_users(data)
+    await asyncio.to_thread(_save_users, data)
 
     return {
         "message": "Account created successfully.",
@@ -198,15 +205,29 @@ async def signup(request: SignupRequest) -> Dict[str, Any]:
 async def login(request: LoginRequest) -> Dict[str, Any]:
     """Log an existing user into SynkAI."""
 
-    data = _load_users()
+    data = await asyncio.to_thread(_load_users)
     users = data["users"]
 
-    user_id, user = _find_user_by_email(users, request.email)
+    user_id, user = _find_user_by_email(
+        users,
+        request.email,
+    )
 
-    if not user or not _verify_password(
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid email or password.",
+        )
+
+    # Password verification is CPU-intensive, so don't block
+    # FastAPI's async event loop while doing it.
+    password_valid = await asyncio.to_thread(
+        _verify_password,
         request.password,
         user.get("password_hash", ""),
-    ):
+    )
+
+    if not password_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
@@ -215,7 +236,7 @@ async def login(request: LoginRequest) -> Dict[str, Any]:
     auth_token = secrets.token_urlsafe(32)
     user["auth_token"] = auth_token
 
-    _save_users(data)
+    await asyncio.to_thread(_save_users, data)
 
     return {
         "message": "Login successful.",
@@ -236,8 +257,12 @@ async def get_profile(
 ) -> Dict[str, Any]:
     """Return the currently authenticated user's profile."""
 
-    data = _load_users()
-    user_id, user = _get_authenticated_user(x_auth_token, data)
+    data = await asyncio.to_thread(_load_users)
+
+    user_id, user = _get_authenticated_user(
+        x_auth_token,
+        data,
+    )
 
     return {
         "id": user_id,
@@ -255,8 +280,12 @@ async def update_profile(
 ) -> Dict[str, Any]:
     """Update and permanently save the authenticated user's profile."""
 
-    data = _load_users()
-    user_id, user = _get_authenticated_user(x_auth_token, data)
+    data = await asyncio.to_thread(_load_users)
+
+    user_id, user = _get_authenticated_user(
+        x_auth_token,
+        data,
+    )
 
     name = request.name.strip()
     workspace = request.workspace.strip() or "SynkAI"
@@ -268,7 +297,10 @@ async def update_profile(
             detail="Name is required.",
         )
 
-    existing_id, existing_user = _find_user_by_email(data["users"], email)
+    existing_id, existing_user = _find_user_by_email(
+        data["users"],
+        email,
+    )
 
     if existing_user and existing_id != user_id:
         raise HTTPException(
@@ -280,7 +312,7 @@ async def update_profile(
     user["email"] = email
     user["workspace"] = workspace
 
-    _save_users(data)
+    await asyncio.to_thread(_save_users, data)
 
     return {
         "message": "Profile updated successfully.",
@@ -300,10 +332,17 @@ async def logout(
 ) -> Dict[str, str]:
     """Invalidate the current authentication token."""
 
-    data = _load_users()
-    _, user = _get_authenticated_user(x_auth_token, data)
+    data = await asyncio.to_thread(_load_users)
+
+    _, user = _get_authenticated_user(
+        x_auth_token,
+        data,
+    )
 
     user["auth_token"] = None
-    _save_users(data)
 
-    return {"message": "Logged out successfully."}
+    await asyncio.to_thread(_save_users, data)
+
+    return {
+        "message": "Logged out successfully."
+    }

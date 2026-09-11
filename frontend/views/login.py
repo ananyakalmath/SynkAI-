@@ -4,7 +4,6 @@ from frontend.components import api
 
 
 def render(go):
-    # Create one centred column for the entire login experience.
     left, center, right = st.columns([1, 2, 1])
 
     with center:
@@ -36,12 +35,14 @@ def render(go):
         email = st.text_input(
             "Email",
             placeholder="you@example.com",
+            key="login_email",
         )
 
         password = st.text_input(
             "Password",
             type="password",
             placeholder="Enter your password",
+            key="login_password",
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -50,18 +51,27 @@ def render(go):
             "Log in",
             use_container_width=True,
             type="primary",
+            key="login_submit",
         ):
-            if not email or not password:
+            if not email.strip() or not password:
                 st.error("Please enter your email and password.")
                 return
 
             try:
-                result = api.login(email, password)
+                result = api.login(
+                    email=email.strip(),
+                    password=password,
+                )
 
+                # Store the authenticated user's information.
                 st.session_state.auth_token = result["auth_token"]
                 st.session_state.user = result["user"]
                 st.session_state.logged_in = True
+
+                # Send the user into the application.
                 st.session_state.route = "home"
+
+                # Reload meeting data after authentication.
                 st.session_state.bootstrapped = False
 
                 st.rerun()
@@ -85,6 +95,7 @@ def render(go):
         if st.button(
             "Create an account",
             use_container_width=True,
+            key="go_signup",
         ):
             st.session_state.route = "signup"
             st.rerun()
