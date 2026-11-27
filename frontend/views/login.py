@@ -83,6 +83,24 @@ def render(go) -> None:
     left, center, right = st.columns([1, 2, 1])
 
     with center:
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stButton"] button[kind="primary"] {
+                border-radius: 10px;
+                font-weight: 600;
+                transition: all 0.2s ease;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+            }
+            div[data-testid="stButton"] button[kind="primary"]:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 7px 18px rgba(0, 0, 0, 0.20);
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
         st.html(
             """
             <div style="text-align: center; margin-top: 4rem; margin-bottom: 2.5rem;">
