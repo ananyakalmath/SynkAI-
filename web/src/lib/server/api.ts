@@ -130,6 +130,29 @@ export type GoogleLoginUrlResponse = {
 
 export type Participant = { name: string; email: string };
 
+export type MeetingWriteData = {
+	title: string;
+	objective?: string | null;
+	meeting_type: string;
+	date: string;
+	start_time: string;
+	end_time: string;
+	timezone: string;
+	location?: string | null;
+	participants: Participant[];
+	document_ids?: string[];
+	previous_document_id?: string | null;
+	reminder_24h_enabled?: boolean;
+	reminder_1h_enabled?: boolean;
+};
+
+export type EmailSendResult = { email: string; success: boolean; error: string | null };
+
+export type MeetingWriteResponse = {
+	meeting: ScheduledMeeting;
+	invite_results: EmailSendResult[];
+};
+
 export type ScheduledMeeting = {
 	id: string;
 	workspace_id: string;
@@ -205,4 +228,65 @@ export function listScheduledMeetings(
 	month: number
 ): Promise<{ meetings: ScheduledMeeting[] }> {
 	return apiFetch('/scheduled-meetings', { token, params: { year, month } });
+}
+
+export function getScheduledMeeting(token: string, meetingId: string): Promise<ScheduledMeeting> {
+	return apiFetch(`/scheduled-meetings/${meetingId}`, { token });
+}
+
+export function createScheduledMeeting(
+	token: string,
+	data: MeetingWriteData
+): Promise<MeetingWriteResponse> {
+	return apiFetch('/scheduled-meetings', { method: 'POST', token, json: data, timeoutMs: 30_000 });
+}
+
+export function updateScheduledMeeting(
+	token: string,
+	meetingId: string,
+	data: MeetingWriteData
+): Promise<MeetingWriteResponse> {
+	return apiFetch(`/scheduled-meetings/${meetingId}`, {
+		method: 'PUT',
+		token,
+		json: data,
+		timeoutMs: 30_000
+	});
+}
+
+export function cancelScheduledMeeting(
+	token: string,
+	meetingId: string
+): Promise<MeetingWriteResponse> {
+	return apiFetch(`/scheduled-meetings/${meetingId}/cancel`, {
+		method: 'POST',
+		token,
+		timeoutMs: 30_000
+	});
+}
+
+// ----------------------------------------------------------------------------
+// Google Calendar connect (incremental authorization, separate from sign-in)
+// ----------------------------------------------------------------------------
+
+export function googleCalendarConnectUrl(token: string): Promise<GoogleLoginUrlResponse> {
+	return apiFetch('/auth/google/calendar/connect', { token });
+}
+
+export function googleCalendarCallback(
+	code: string,
+	state: string
+): Promise<{ connected: boolean }> {
+	return apiFetch('/auth/google/calendar/connect/callback', {
+		method: 'POST',
+		json: { code, state }
+	});
+}
+
+export function googleCalendarStatus(token: string): Promise<{ connected: boolean }> {
+	return apiFetch('/auth/google/calendar/status', { token });
+}
+
+export function googleCalendarDisconnect(token: string): Promise<{ connected: boolean }> {
+	return apiFetch('/auth/google/calendar/disconnect', { method: 'POST', token });
 }
