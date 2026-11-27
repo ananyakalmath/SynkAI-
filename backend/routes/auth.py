@@ -1,348 +1,188 @@
 """
-Authentication and profile routes for SynkAI.
+Authentication, onboarding, and profile routes for SynkAI.
 
-Handles user signup, login, profile updates, and logout.
-User accounts are persisted in data/users.json.
+No passwords: accounts exist only via "Sign in with Google" or an emailed one-time
+code. A brand-new account must complete onboarding (name, company, role) before it
+can do anything else — see backend.dependencies.get_current_user.
 """
 
-import asyncio
-import hashlib
-import json
-import secrets
-from pathlib import Path
-from typing import Any, Dict
+from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, status
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from backend.dependencies import get_session_token_and_user, get_session_user
+from backend.models.auth import (
+    AuthResult,
+    EmailCodeRequest,
+    EmailCodeVerifyRequest,
+    GoogleCallbackRequest,
+    GoogleLoginURLResponse,
+    OnboardingRequest,
+    ProfileUpdateRequest,
+    UserProfileResponse,
+    WorkspaceInfo,
+)
+from backend.services import auth_service, google_oauth_service
+from backend.services.auth_service import AuthContext, AuthError, RateLimitError
+from backend.services.google_oauth_service import GoogleOAuthError
+from backend.utils.logger import get_logger
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-USERS_FILE = PROJECT_ROOT / "data" / "users.json"
-
+logger = get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
 
-class SignupRequest(BaseModel):
-    name: str
-    email: EmailStr
-    password: str
-    workspace: str = "SynkAI"
+def _profile_for(context: AuthContext) -> UserProfileResponse:
+    workspace = None
+    if context.workspace_id:
+        ws = auth_service.get_workspace(context.workspace_id)
+        if ws:
+            workspace = WorkspaceInfo(id=ws["id"], company_name=ws["company_name"], domain=ws["domain"])
 
-
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
-
-class ProfileUpdateRequest(BaseModel):
-    name: str
-    email: EmailStr
-    workspace: str
-
-
-def _load_users() -> Dict[str, Any]:
-    if not USERS_FILE.exists():
-        return {"users": {}}
-
-    try:
-        with USERS_FILE.open("r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if not isinstance(data, dict):
-            return {"users": {}}
-
-        data.setdefault("users", {})
-        return data
-
-    except (json.JSONDecodeError, OSError):
-        return {"users": {}}
-
-
-def _save_users(data: Dict[str, Any]) -> None:
-    USERS_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    temporary_file = USERS_FILE.with_suffix(".tmp")
-
-    with temporary_file.open("w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
-
-    temporary_file.replace(USERS_FILE)
-
-
-def _hash_password(password: str, salt: str | None = None) -> str:
-    salt = salt or secrets.token_hex(16)
-
-    password_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        120_000,
-    ).hex()
-
-    return f"{salt}${password_hash}"
-
-
-def _verify_password(password: str, stored_hash: str) -> bool:
-    try:
-        salt, expected_hash = stored_hash.split("$", 1)
-    except ValueError:
-        return False
-
-    actual_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        120_000,
-    ).hex()
-
-    return secrets.compare_digest(actual_hash, expected_hash)
-
-
-def _find_user_by_email(
-    users: Dict[str, Any],
-    email: str,
-) -> tuple[str | None, Dict[str, Any] | None]:
-    target = email.strip().lower()
-
-    for user_id, user in users.items():
-        if user.get("email", "").lower() == target:
-            return user_id, user
-
-    return None, None
-
-
-def _get_authenticated_user(
-    auth_token: str | None,
-    data: Dict[str, Any],
-) -> tuple[str, Dict[str, Any]]:
-    if not auth_token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
-
-    users = data.get("users", {})
-
-    for user_id, user in users.items():
-        if user.get("auth_token") == auth_token:
-            return user_id, user
-
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Invalid or expired authentication token.",
+    return UserProfileResponse(
+        id=context.user_id,
+        email=context.email,
+        full_name=context.full_name,
+        onboarded=context.onboarded,
+        google_connected=context.google_connected,
+        role_title=context.title,
+        workspace=workspace,
+        membership_role=context.role,
+        membership_status=context.membership_status,
     )
 
 
-@router.post(
-    "/signup",
-    status_code=status.HTTP_201_CREATED,
-)
-async def signup(request: SignupRequest) -> Dict[str, Any]:
-    """Create a new SynkAI account."""
+@router.get("/google/login", response_model=GoogleLoginURLResponse)
+async def google_login(invite_code: Optional[str] = None) -> GoogleLoginURLResponse:
+    """
+    Returns the URL to send the user to for Google sign-in. `invite_code`, if the user
+    arrived via an invite link, rides through the redirect inside the state record and
+    comes back in the callback response.
+    """
+    state = auth_service.create_oauth_state(invite_code)
+    try:
+        url = google_oauth_service.build_authorization_url(state)
+    except GoogleOAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
+    return GoogleLoginURLResponse(authorization_url=url, state=state)
 
-    if len(request.password) < 8:
+
+@router.post("/google/callback", response_model=AuthResult)
+async def google_callback(request: GoogleCallbackRequest) -> AuthResult:
+    """Exchanges a Google authorization code for a SynkAI session."""
+    state_record = auth_service.consume_oauth_state(request.state)
+    if state_record is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Password must be at least 8 characters long.",
+            detail="This sign-in link has expired or was already used. Please try again.",
         )
 
-    name = request.name.strip()
-    workspace = request.workspace.strip() or "SynkAI"
-    email = request.email.strip().lower()
+    try:
+        tokens = google_oauth_service.exchange_code_for_tokens(request.code)
+        userinfo = google_oauth_service.fetch_userinfo(tokens["access_token"])
+    except GoogleOAuthError as exc:
+        logger.error(f"Google sign-in failed: {exc}")
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
-    if not name:
+    sub = userinfo.get("sub")
+    email = userinfo.get("email")
+    if not sub or not email:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Name is required.",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Google did not return the expected profile information.",
         )
 
-    data = _load_users()
-    users = data["users"]
+    user_id = auth_service.get_or_create_user_by_google(sub, email, userinfo.get("name"))
+    session_token = auth_service.create_session(user_id)
+    context = auth_service.resolve_session(session_token)
 
-    _, existing_user = _find_user_by_email(users, email)
-
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="An account with this email already exists.",
-        )
-
-    user_id = secrets.token_hex(16)
-    auth_token = secrets.token_urlsafe(32)
-
-    # Password hashing is CPU work, so run it outside the async event loop.
-    password_hash = await asyncio.to_thread(
-        _hash_password,
-        request.password,
+    return AuthResult(
+        session_token=session_token,
+        user=_profile_for(context),
+        invite_code=state_record.get("invite_code"),
     )
 
-    users[user_id] = {
-        "id": user_id,
-        "name": name,
-        "email": email,
-        "workspace": workspace,
-        "role": "Workspace owner",
-        "password_hash": password_hash,
-        "auth_token": auth_token,
-    }
 
-    await asyncio.to_thread(_save_users, data)
+@router.post("/email/request-code")
+async def request_email_code(request: EmailCodeRequest) -> dict:
+    """Emails a one-time, 10-minute, single-use login code to the given address."""
+    try:
+        auth_service.request_email_code(request.email)
+    except RateLimitError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
+    except AuthError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc))
 
-    return {
-        "message": "Account created successfully.",
-        "user": {
-            "id": user_id,
-            "name": name,
-            "email": email,
-            "workspace": workspace,
-            "role": "Workspace owner",
-        },
-        "auth_token": auth_token,
-    }
+    return {"message": "If that email is valid, a sign-in code has been sent."}
 
 
-@router.post("/login")
-async def login(request: LoginRequest) -> Dict[str, Any]:
-    """Log an existing user into SynkAI."""
+@router.post("/email/verify-code", response_model=AuthResult)
+async def verify_email_code(request: EmailCodeVerifyRequest) -> AuthResult:
+    """Verifies a login code and issues a session."""
+    try:
+        valid = auth_service.verify_email_code(request.email, request.code)
+    except AuthError as exc:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
 
-    data = await asyncio.to_thread(_load_users)
-    users = data["users"]
+    if not valid:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired code.")
 
-    user_id, user = _find_user_by_email(
-        users,
-        request.email,
-    )
+    user_id = auth_service.get_or_create_user_by_email(request.email)
+    session_token = auth_service.create_session(user_id)
+    context = auth_service.resolve_session(session_token)
 
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
+    return AuthResult(session_token=session_token, user=_profile_for(context))
+
+
+@router.get("/me", response_model=UserProfileResponse)
+async def get_me(context: AuthContext = Depends(get_session_user)) -> UserProfileResponse:
+    """Returns the current session's user, onboarding state, and workspace/role."""
+    return _profile_for(context)
+
+
+@router.post("/onboarding", response_model=UserProfileResponse)
+async def onboarding(
+    request: OnboardingRequest,
+    context: AuthContext = Depends(get_session_user),
+) -> UserProfileResponse:
+    """
+    Completes a new account's profile and places them in a workspace — via an invite
+    code, or else matched by the user's verified email domain (never by a public/
+    freemail domain, and never by the company name they typed).
+    """
+    try:
+        auth_service.complete_onboarding(
+            context.user_id,
+            request.full_name,
+            request.company_name,
+            request.role_title,
+            invite_code=request.invite_code,
         )
-
-    # Password verification is CPU-intensive, so don't block
-    # FastAPI's async event loop while doing it.
-    password_valid = await asyncio.to_thread(
-        _verify_password,
-        request.password,
-        user.get("password_hash", ""),
-    )
-
-    if not password_valid:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-        )
-
-    auth_token = secrets.token_urlsafe(32)
-    user["auth_token"] = auth_token
-
-    await asyncio.to_thread(_save_users, data)
-
-    return {
-        "message": "Login successful.",
-        "user": {
-            "id": user_id,
-            "name": user["name"],
-            "email": user["email"],
-            "workspace": user.get("workspace", "SynkAI"),
-            "role": user.get("role", "Workspace owner"),
-        },
-        "auth_token": auth_token,
-    }
+    except AuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    refreshed = auth_service.get_context(context.user_id)
+    return _profile_for(refreshed)
 
 
-@router.get("/profile")
-async def get_profile(
-    x_auth_token: str | None = Header(default=None),
-) -> Dict[str, Any]:
-    """Return the currently authenticated user's profile."""
-
-    data = await asyncio.to_thread(_load_users)
-
-    user_id, user = _get_authenticated_user(
-        x_auth_token,
-        data,
-    )
-
-    return {
-        "id": user_id,
-        "name": user["name"],
-        "email": user["email"],
-        "workspace": user.get("workspace", "SynkAI"),
-        "role": user.get("role", "Workspace owner"),
-    }
-
-
-@router.put("/profile")
+@router.put("/profile", response_model=UserProfileResponse)
 async def update_profile(
     request: ProfileUpdateRequest,
-    x_auth_token: str | None = Header(default=None),
-) -> Dict[str, Any]:
-    """Update and permanently save the authenticated user's profile."""
-
-    data = await asyncio.to_thread(_load_users)
-
-    user_id, user = _get_authenticated_user(
-        x_auth_token,
-        data,
-    )
-
-    name = request.name.strip()
-    workspace = request.workspace.strip() or "SynkAI"
-    email = request.email.strip().lower()
-
-    if not name:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Name is required.",
-        )
-
-    existing_id, existing_user = _find_user_by_email(
-        data["users"],
-        email,
-    )
-
-    if existing_user and existing_id != user_id:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="That email is already being used by another account.",
-        )
-
-    user["name"] = name
-    user["email"] = email
-    user["workspace"] = workspace
-
-    await asyncio.to_thread(_save_users, data)
-
-    return {
-        "message": "Profile updated successfully.",
-        "user": {
-            "id": user_id,
-            "name": user["name"],
-            "email": user["email"],
-            "workspace": user["workspace"],
-            "role": user.get("role", "Workspace owner"),
-        },
-    }
+    context: AuthContext = Depends(get_session_user),
+) -> UserProfileResponse:
+    """Updates the editable parts of a profile: full name and role/title."""
+    auth_service.update_profile(context.user_id, request.full_name, request.role_title)
+    return _profile_for(auth_service.get_context(context.user_id))
 
 
 @router.post("/logout")
-async def logout(
-    x_auth_token: str | None = Header(default=None),
-) -> Dict[str, str]:
-    """Invalidate the current authentication token."""
+async def logout(token_and_context=Depends(get_session_token_and_user)) -> dict:
+    """Logs out the current session only."""
+    token, _ = token_and_context
+    auth_service.revoke_session(token)
+    return {"message": "Logged out."}
 
-    data = await asyncio.to_thread(_load_users)
 
-    _, user = _get_authenticated_user(
-        x_auth_token,
-        data,
-    )
-
-    user["auth_token"] = None
-
-    await asyncio.to_thread(_save_users, data)
-
-    return {
-        "message": "Logged out successfully."
-    }
+@router.post("/logout-all")
+async def logout_all(context: AuthContext = Depends(get_session_user)) -> dict:
+    """Logs out every session/device for this user."""
+    auth_service.revoke_all_sessions(context.user_id)
+    return {"message": "Logged out of all devices."}

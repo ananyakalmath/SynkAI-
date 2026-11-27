@@ -19,13 +19,15 @@ if PROJECT_ROOT not in sys.path:
 from frontend.components import api, icons, store, ui  # noqa: E402
 from frontend.components.theme import apply_theme  # noqa: E402
 from frontend.views import analysis as analysis_view  # noqa: E402
+from frontend.views import calendar as calendar_view  # noqa: E402
 from frontend.views import chat as chat_view  # noqa: E402
 from frontend.views import history as history_view  # noqa: E402
 from frontend.views import home as home_view  # noqa: E402
 from frontend.views import login as login_view  # noqa: E402
+from frontend.views import onboarding as onboarding_view  # noqa: E402
+from frontend.views import pending_approval as pending_approval_view  # noqa: E402
 from frontend.views import profile as profile_view  # noqa: E402
 from frontend.views import settings as settings_view  # noqa: E402
-from frontend.views import signup as signup_view  # noqa: E402
 from frontend.views import upload as upload_view  # noqa: E402
 
 
@@ -36,6 +38,7 @@ USER_TAGLINE = os.getenv("SYNKAI_USER_TAGLINE", "Workspace owner")
 NAV_ITEMS = [
     ("home", "Home", home_view.render),
     ("upload", "Upload & Summarize", upload_view.render),
+    ("calendar", "Calendar", calendar_view.render),
     ("chat", "AI Chat", chat_view.render),
     ("analysis", "Meeting Analysis", analysis_view.render),
     ("history", "History", history_view.render),
@@ -174,8 +177,9 @@ def _render_sidebar() -> None:
         # Get the currently authenticated user's information.
         user = st.session_state.get("user") or {}
 
-        current_name = user.get("name") or USER_NAME
-        current_role = user.get("role") or USER_TAGLINE
+        current_name = user.get("full_name") or USER_NAME
+        workspace_name = (user.get("workspace") or {}).get("company_name")
+        current_role = workspace_name or user.get("role_title") or USER_TAGLINE
 
         if st.button(
             f"{current_name}  ·  {current_role}",
@@ -197,6 +201,65 @@ def _render_sidebar() -> None:
         )
 
 
+def _handle_invite_link() -> None:
+    """
+    An invite email points at this app's own URL with ?invite=<code>. The code is
+    stashed in session state (not left in the URL) so it survives both a plain rerun
+    and, via the backend's oauth_states record (see login_view), a full redirect out
+    to Google and back — which normally starts a fresh browser session and would
+    otherwise lose anything held only in session state.
+    """
+    code = st.query_params.get("invite")
+    if not code:
+        return
+    st.session_state.pending_invite_code = code
+    st.query_params.clear()
+
+
+def _handle_google_oauth_redirect() -> None:
+    """
+    Google redirects the browser back to this app's own URL with ?code=&state=.
+    Streamlit sees that as a normal page load, so every run checks for it, exchanges
+    the code for a session on the backend, then clears the query params so a page
+    refresh doesn't try to redeem the same (already-used) code again.
+
+    Two different flows land here with the same shape: an ordinary sign-in, and a
+    "Connect Google Calendar" incremental-authorization round trip (Phase 3). The
+    `state` value itself says which one — a calendar-connect state is prefixed
+    "cal_" by the backend (see auth_service.create_calendar_connect_state) — so no
+    extra round trip is needed just to ask which flow a redirect belongs to.
+    """
+    params = st.query_params
+    code = params.get("code")
+    state = params.get("state")
+    if not code or not state:
+        return
+
+    st.query_params.clear()
+
+    if state.startswith("cal_"):
+        try:
+            api.google_calendar_callback(code, state)
+            st.session_state.notice = "Google Calendar connected."
+        except api.BackendError as exc:
+            st.session_state.notice = str(exc)
+        return
+
+    try:
+        result = api.google_callback(code, state)
+    except api.BackendError as exc:
+        st.session_state.notice = str(exc)
+        return
+
+    st.session_state.auth_token = result["session_token"]
+    st.session_state.user = result["user"]
+    st.session_state.logged_in = True
+    st.session_state.bootstrapped = False
+    if result.get("invite_code"):
+        st.session_state.pending_invite_code = result["invite_code"]
+    st.session_state.route = "home" if result["user"]["onboarded"] else "onboarding"
+
+
 def main() -> None:
     """
     Renders the application.
@@ -204,25 +267,30 @@ def main() -> None:
 
     _init_state()
     apply_theme()
+    _handle_invite_link()
+    _handle_google_oauth_redirect()
+
+    if st.session_state.get("notice"):
+        st.info(st.session_state.notice)
+        st.session_state.notice = None
 
     # ---------------------------------------------------------
-    # AUTHENTICATION
+    # AUTHENTICATION / ONBOARDING / APPROVAL GATES
     # ---------------------------------------------------------
-    # Users must log in or create an account before seeing
-    # the actual SynkAI workspace.
+    # Users must sign in, complete onboarding, and (if joining an existing
+    # workspace) be approved, before seeing the actual SynkAI workspace.
     if not st.session_state.logged_in:
+        login_view.render(go)
+        return
 
-        auth_routes = {
-            "login": login_view.render,
-            "signup": signup_view.render,
-        }
+    user = st.session_state.get("user") or {}
 
-        renderer = auth_routes.get(
-            st.session_state.route,
-            login_view.render,
-        )
+    if not user.get("onboarded"):
+        onboarding_view.render(go)
+        return
 
-        renderer(go)
+    if user.get("membership_status") == "pending":
+        pending_approval_view.render(go)
         return
 
     # ---------------------------------------------------------

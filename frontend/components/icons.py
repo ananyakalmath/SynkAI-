@@ -82,6 +82,7 @@ _PATHS: Dict[str, str] = {
 MATERIAL: Dict[str, str] = {
     "home": ":material/cottage:",
     "upload": ":material/file_upload:",
+    "calendar": ":material/calendar_month:",
     "chat": ":material/forum:",
     "analysis": ":material/insights:",
     "history": ":material/history:",

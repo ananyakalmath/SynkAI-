@@ -8,9 +8,11 @@ real meeting history instead of placeholder rows. Does not touch the RAG or agen
 import asyncio
 from typing import Any, Dict, List
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
+from backend.dependencies import get_current_user
 from backend.models.meeting import MeetingListResponse, MeetingRecord
+from backend.services.auth_service import AuthContext
 from backend.services.vector_service import VectorService
 from backend.utils.logger import get_logger
 
@@ -20,14 +22,15 @@ router = APIRouter()
 vector_service = VectorService()
 
 
-def _collect_meetings() -> List[MeetingRecord]:
+def _collect_meetings(workspace_id: str) -> List[MeetingRecord]:
     """
-    Groups the stored vector chunks by document_id into one record per meeting.
+    Groups the stored vector chunks by document_id into one record per meeting,
+    scoped to a single workspace.
 
     Returns:
         List[MeetingRecord]: Indexed meetings, newest first.
     """
-    results = vector_service.collection.get(include=["metadatas"])
+    results = vector_service.collection.get(where={"workspace_id": workspace_id}, include=["metadatas"])
     metadatas = (results or {}).get("metadatas") or []
 
     grouped: Dict[str, Dict[str, Any]] = {}
@@ -61,14 +64,15 @@ def _collect_meetings() -> List[MeetingRecord]:
     status_code=status.HTTP_200_OK,
     summary="List meeting transcripts indexed in the vector store"
 )
-async def list_meetings() -> MeetingListResponse:
+async def list_meetings(current: AuthContext = Depends(get_current_user)) -> MeetingListResponse:
     """
-    Returns every meeting transcript currently indexed in ChromaDB, newest first.
+    Returns every meeting transcript indexed in ChromaDB for the caller's workspace,
+    newest first.
     """
-    logger.info("Listing indexed meetings from the vector store...")
+    logger.info(f"Listing indexed meetings for workspace '{current.workspace_id}'...")
 
     try:
-        meetings = await asyncio.to_thread(_collect_meetings)
+        meetings = await asyncio.to_thread(_collect_meetings, current.workspace_id)
     except Exception as exc:
         logger.error(f"Failed to list indexed meetings: {exc}", exc_info=True)
         raise HTTPException(

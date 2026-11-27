@@ -61,7 +61,8 @@ def test_vector_service_store_and_search(mock_embed):
         stored_count = service.store_chunks(
             document_id=test_doc_id,
             filename=test_filename,
-            chunks=test_chunks
+            chunks=test_chunks,
+            workspace_id="test-workspace"
         )
         assert stored_count == 2
 
@@ -69,6 +70,7 @@ def test_vector_service_store_and_search(mock_embed):
         matches = service.similarity_search(
             query_text="roadmap meeting",
             document_id=test_doc_id,
+            workspace_id="test-workspace",
             top_k=2
         )
         assert len(matches) == 2
@@ -81,6 +83,7 @@ def test_vector_service_store_and_search(mock_embed):
         post_delete_matches = service.similarity_search(
             query_text="roadmap meeting",
             document_id=test_doc_id,
+            workspace_id="test-workspace",
             top_k=2
         )
         assert len(post_delete_matches) == 0
@@ -107,11 +110,12 @@ def test_retrieval_service_rag(mock_llm, mock_embed):
         chunks = [
             {"chunk_number": 1, "chunk_text": "Context: Alice owns the embeddings task for Sprint 3."}
         ]
-        vec_service.store_chunks(document_id=doc_id, filename=filename, chunks=chunks)
+        vec_service.store_chunks(document_id=doc_id, filename=filename, chunks=chunks, workspace_id="test-workspace")
 
         res = ret_service.answer_question(
             document_id=doc_id,
-            question="Who owns the embeddings task?"
+            question="Who owns the embeddings task?",
+            workspace_id="test-workspace"
         )
 
         assert res["answer"] == "Alice owns the embeddings task."
@@ -142,11 +146,12 @@ def test_retrieval_service_unavailable(mock_llm, mock_embed):
         chunks = [
             {"chunk_number": 1, "chunk_text": "Roadmap planning discussion."}
         ]
-        vec_service.store_chunks(document_id=doc_id, filename=filename, chunks=chunks)
+        vec_service.store_chunks(document_id=doc_id, filename=filename, chunks=chunks, workspace_id="test-workspace")
 
         res = ret_service.answer_question(
             document_id=doc_id,
-            question="What is Bob's task?"
+            question="What is Bob's task?",
+            workspace_id="test-workspace"
         )
         # Should be post-processed to the exact negative answer phrase
         assert res["answer"] == "I couldn't find that information in this meeting transcript."

@@ -5,12 +5,14 @@ Handles POST /summarize endpoint via Ollama LLM.
 
 import asyncio
 import os
-from fastapi import APIRouter, HTTPException, status
-from backend.config import settings
+from fastapi import APIRouter, Depends, HTTPException, status
+from backend.dependencies import get_current_user
 from backend.models.summary import SummaryRequest, SummaryResponse
+from backend.services.auth_service import AuthContext
 from backend.services.file_parser import FileParserService
 from backend.services.summary_service import SummaryService
 from backend.utils.logger import get_logger
+from backend.utils.uploads import hash_file, workspace_uploads_dir
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -23,10 +25,14 @@ summary_service = SummaryService()
     status_code=status.HTTP_200_OK,
     summary="Generate AI summary from meeting transcript"
 )
-async def generate_meeting_summary(request: SummaryRequest) -> SummaryResponse:
+async def generate_meeting_summary(
+    request: SummaryRequest,
+    current: AuthContext = Depends(get_current_user),
+) -> SummaryResponse:
     """
     Generates an AI summary (Executive Summary, Key Discussion Points, Meeting Outcome)
-    from an uploaded filename or direct transcript text.
+    from an uploaded filename or direct transcript text. A filename is only ever looked
+    up inside the caller's own workspace folder.
 
     - **request**: SummaryRequest containing either `filename` or `transcript_text`.
     """
@@ -34,7 +40,7 @@ async def generate_meeting_summary(request: SummaryRequest) -> SummaryResponse:
     target_filename = request.filename
 
     if request.filename:
-        file_path = os.path.join(settings.UPLOADS_DIR, os.path.basename(request.filename))
+        file_path = os.path.join(workspace_uploads_dir(current.workspace_id), os.path.basename(request.filename))
         if not os.path.exists(file_path):
             logger.error(f"Transcript file not found: {file_path}")
             raise HTTPException(
@@ -43,7 +49,14 @@ async def generate_meeting_summary(request: SummaryRequest) -> SummaryResponse:
             )
 
         try:
-            transcript_content = FileParserService.parse_file(file_path)
+            # Hash the on-disk file so a content match already extracted by /upload or
+            # /chat/upload (video/audio transcription especially) is reused rather than
+            # re-run. Hashing is a cheap disk read; it's the parse/transcription it
+            # guards against that's expensive, so this still runs off the event loop.
+            file_hash = await asyncio.to_thread(hash_file, file_path)
+            transcript_content = await asyncio.to_thread(
+                FileParserService.parse_file, file_path, file_hash
+            )
         except Exception as exc:
             logger.error(f"Error parsing file '{file_path}': {exc}")
             raise HTTPException(

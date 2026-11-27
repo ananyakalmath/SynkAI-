@@ -5,13 +5,16 @@ Provides POST /meeting/analyze to execute the LangGraph workflow.
 
 import asyncio
 import os
-from fastapi import APIRouter, HTTPException, status
-from backend.config import settings
+from fastapi import APIRouter, Depends, HTTPException, status
+from backend.dependencies import get_current_user
 from backend.models.analysis import MeetingAnalysisRequest, MeetingAnalysisResponse
+from backend.services import analysis_store
+from backend.services.auth_service import AuthContext
 from backend.services.file_parser import FileParserService
 from backend.services.vector_service import VectorService
 from backend.services.meeting_analysis_service import MeetingAnalysisService
 from backend.utils.logger import get_logger
+from backend.utils.uploads import workspace_uploads_dir
 
 logger = get_logger(__name__)
 router = APIRouter()
@@ -21,25 +24,27 @@ meeting_analysis_service = MeetingAnalysisService()
 vector_service = VectorService()
 
 
-def _get_transcript_by_document_id(document_id: str) -> str:
+def _get_transcript_by_document_id(document_id: str, workspace_id: str) -> str:
     """
-    Tries to locate the transcript text for a given document_id.
+    Tries to locate the transcript text for a given document_id, scoped to the
+    caller's workspace so a document_id from another workspace resolves to nothing.
     First tries to retrieve the filename from ChromaDB and read the file from uploads/.
     If that fails, reconstructs the text directly from the stored vector chunks.
     """
-    logger.info(f"Locating transcript for document_id '{document_id}'...")
+    logger.info(f"Locating transcript for document_id '{document_id}' (workspace '{workspace_id}')...")
+    where_filter = {"$and": [{"document_id": document_id}, {"workspace_id": workspace_id}]}
 
     # 1. Query ChromaDB for a chunk metadata to get the filename
     try:
         results = vector_service.collection.get(
-            where={"document_id": document_id},
+            where=where_filter,
             limit=1,
             include=["metadatas"]
         )
         if results and results.get("metadatas") and len(results["metadatas"]) > 0:
             filename = results["metadatas"][0].get("filename")
             if filename:
-                file_path = os.path.join(settings.UPLOADS_DIR, filename)
+                file_path = os.path.join(workspace_uploads_dir(workspace_id), filename)
                 if os.path.exists(file_path):
                     logger.info(f"Located file '{file_path}' matching document_id. Parsing file...")
                     return FileParserService.parse_file(file_path)
@@ -49,7 +54,7 @@ def _get_transcript_by_document_id(document_id: str) -> str:
     # 2. Fallback: Query all chunks and sort by chunk_number to reconstruct transcript
     try:
         all_results = vector_service.collection.get(
-            where={"document_id": document_id},
+            where=where_filter,
             include=["metadatas", "documents"]
         )
         if all_results and all_results.get("documents") and len(all_results["documents"]) > 0:
@@ -79,16 +84,20 @@ def _get_transcript_by_document_id(document_id: str) -> str:
     status_code=status.HTTP_200_OK,
     summary="Execute multi-agent LangGraph workflow over a meeting transcript"
 )
-async def analyze_meeting(request: MeetingAnalysisRequest) -> MeetingAnalysisResponse:
+async def analyze_meeting(
+    request: MeetingAnalysisRequest,
+    current: AuthContext = Depends(get_current_user),
+) -> MeetingAnalysisResponse:
     """
     Runs multi-agent analysis (Summary, Action Items, Decisions, Deadlines, Risks) using LangGraph.
-    Accepts either an existing document_id or raw transcript text.
+    Accepts either an existing document_id (resolved within the caller's workspace only)
+    or raw transcript text.
     """
     transcript_content = ""
 
     if request.document_id:
         try:
-            transcript_content = _get_transcript_by_document_id(request.document_id)
+            transcript_content = _get_transcript_by_document_id(request.document_id, current.workspace_id)
         except FileNotFoundError as exc:
             logger.error(str(exc))
             raise HTTPException(
@@ -117,6 +126,18 @@ async def analyze_meeting(request: MeetingAnalysisRequest) -> MeetingAnalysisRes
             meeting_analysis_service.analyze_transcript,
             transcript_content
         )
+
+        # Persisted so a later meeting can pull "pending tasks/decisions from last
+        # meeting" into its invite — only possible when analyzing an existing
+        # document_id, since free-form transcript_text has nothing to key it by.
+        if request.document_id:
+            try:
+                analysis_store.save_analysis(
+                    current.workspace_id, request.document_id, analysis_result.model_dump()
+                )
+            except Exception as exc:
+                logger.error(f"Failed to persist analysis for '{request.document_id}': {exc}")
+
         return analysis_result
     except Exception as exc:
         logger.error(f"Meeting analysis failed: {exc}")

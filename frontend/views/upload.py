@@ -11,8 +11,14 @@ from typing import Callable, Dict, List, Optional
 import streamlit as st
 
 from frontend.components import api, store, ui
+from frontend.components.api import MEDIA_UPLOAD_TIMEOUT
 
-SUPPORTED = ("txt", "pdf", "docx")
+SUPPORTED = (
+    "txt", "pdf", "docx",
+    "mp4", "mov", "mkv", "webm", "avi", "m4v",
+    "mp3", "wav", "m4a", "aac", "flac", "ogg",
+)
+MEDIA_EXTENSIONS = {"mp4", "mov", "mkv", "webm", "avi", "m4v", "mp3", "wav", "m4a", "aac", "flac", "ogg"}
 
 
 def _process(uploaded_file) -> None:
@@ -25,18 +31,31 @@ def _process(uploaded_file) -> None:
     data = uploaded_file.getvalue()
     name = uploaded_file.name
     content_type = uploaded_file.type
+    is_media = name.rsplit(".", 1)[-1].lower() in MEDIA_EXTENSIONS if "." in name else False
 
     st.session_state.notice = None
     st.session_state.upload_info = None
     st.session_state.summary_data = None
 
+    parsing_label = (
+        "Transcribing audio locally with Whisper — this can take a few minutes..."
+        if is_media
+        else "Saving and parsing the transcript..."
+    )
+
     try:
-        with st.spinner("Saving and parsing the transcript..."):
-            upload_info = api.upload_transcript(name, data, content_type)
+        with st.spinner(parsing_label):
+            upload_info = api.upload_transcript(
+                name, data, content_type,
+                timeout=MEDIA_UPLOAD_TIMEOUT if is_media else None,
+            )
         st.session_state.upload_info = upload_info
 
         with st.spinner("Generating embeddings and indexing into ChromaDB..."):
-            indexed = api.index_transcript(name, data, content_type)
+            indexed = api.index_transcript(
+                name, data, content_type,
+                timeout=MEDIA_UPLOAD_TIMEOUT if is_media else None,
+            )
 
         document_id = indexed.get("document_id")
         st.session_state.active_document_id = document_id
@@ -106,8 +125,8 @@ def render(go: Callable[[str], None]) -> None:
     ui.page_header(
         "Workspace",
         "Upload & Summarize",
-        "Bring in a transcript and SynkAI will index it for chat and analysis, then write "
-        "a concise executive summary.",
+        "Bring in a transcript, or a recorded video/audio meeting, and SynkAI will index "
+        "it for chat and analysis, then write a concise executive summary.",
     )
     ui.rule()
 
@@ -122,7 +141,9 @@ def render(go: Callable[[str], None]) -> None:
         )
         ui.spacer(0.4)
         st.markdown(
-            "<p class='sk-meta'>Supported formats — TXT, PDF, DOCX &nbsp;·&nbsp; up to 10 MB</p>",
+            "<p class='sk-meta'>Documents — TXT, PDF, DOCX (up to 10 MB) &nbsp;·&nbsp; "
+            "Recordings — MP4, MOV, MKV, WEBM, AVI, MP3, WAV, M4A (up to 500 MB, "
+            "transcribed locally with Whisper)</p>",
             unsafe_allow_html=True,
         )
 

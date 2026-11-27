@@ -93,7 +93,9 @@ class VectorService:
                 f"Ollama embedding service is unreachable. Please verify Ollama is running and model '{self.embed_model}' is pulled."
             ) from exc
 
-    def store_chunks(self, document_id: str, filename: str, chunks: List[Dict[str, Any]]) -> int:
+    def store_chunks(
+        self, document_id: str, filename: str, chunks: List[Dict[str, Any]], workspace_id: str
+    ) -> int:
         """
         Generates embeddings and stores text chunks in ChromaDB vector collection.
 
@@ -101,6 +103,8 @@ class VectorService:
             document_id (str): Unique document identifier.
             filename (str): Name of the source transcript file.
             chunks (List[Dict[str, Any]]): List of chunk objects.
+            workspace_id (str): Workspace this document belongs to — every read of this
+                data must filter on this field, so no workspace can see another's chunks.
 
         Returns:
             int: Count of vectors successfully stored.
@@ -133,7 +137,8 @@ class VectorService:
                 "filename": filename,
                 "chunk_number": chunk_num,
                 "upload_timestamp": timestamp,
-                "chunk_text": chunk_text
+                "chunk_text": chunk_text,
+                "workspace_id": workspace_id
             })
 
             logger.debug(f"Embeddings generated for chunk {chunk_num}/{len(chunks)} of document '{document_id}'.")
@@ -149,13 +154,18 @@ class VectorService:
         logger.info(f"Vectors stored successfully for document '{document_id}' ({len(ids)} vectors total).")
         return len(ids)
 
-    def similarity_search(self, query_text: str, document_id: str, top_k: int = 5) -> List[Dict[str, Any]]:
+    def similarity_search(
+        self, query_text: str, document_id: str, workspace_id: str, top_k: int = 5
+    ) -> List[Dict[str, Any]]:
         """
-        Performs vector similarity search against ChromaDB filtered by document_id.
+        Performs vector similarity search against ChromaDB filtered by document_id AND
+        workspace_id — the workspace filter is what stops a caller who knows (or
+        guesses) a document_id from another workspace from retrieving anything for it.
 
         Args:
             query_text (str): User question / query string.
             document_id (str): Document ID to filter search.
+            workspace_id (str): Caller's workspace; chunks outside it are never matched.
             top_k (int): Number of top matches to retrieve.
 
         Returns:
@@ -164,7 +174,7 @@ class VectorService:
         logger.info(f"Generating embedding for similarity query: '{query_text[:50]}...'")
         query_embedding = self.generate_embedding(query_text)
 
-        where_filter = {"document_id": document_id}
+        where_filter = {"$and": [{"document_id": document_id}, {"workspace_id": workspace_id}]}
 
         results = self.collection.query(
             query_embeddings=[query_embedding],

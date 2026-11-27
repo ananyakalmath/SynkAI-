@@ -32,6 +32,7 @@ class RetrievalService:
         self,
         document_id: str,
         question: str,
+        workspace_id: str,
         top_k: int = 5
     ) -> Dict[str, Any]:
         """
@@ -40,6 +41,8 @@ class RetrievalService:
         Args:
             document_id (str): Document ID to query.
             question (str): User question.
+            workspace_id (str): Caller's workspace — a document_id from another
+                workspace simply matches nothing, rather than leaking its content.
             top_k (int): Number of context chunks to retrieve.
 
         Returns:
@@ -56,6 +59,7 @@ class RetrievalService:
         sources = self.vector_service.similarity_search(
             query_text=question,
             document_id=document_id,
+            workspace_id=workspace_id,
             top_k=top_k
         )
 

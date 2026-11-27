@@ -61,6 +61,7 @@ synkai-meeting-assistant/
 - **Frontend Dashboard**: Streamlit
 - **LLM Engine**: Ollama (`qwen3` model)
 - **Document Extractors**: `pypdf`, `python-docx`
+- **Video/Audio Transcription**: `ffmpeg` (audio extraction) + `faster-whisper` (local speech-to-text)
 - **Configuration**: Pydantic v2, Pydantic Settings, `python-dotenv`
 - **Testing**: Pytest, HTTPX
 
@@ -78,6 +79,16 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+`faster-whisper` needs `ffmpeg` on `PATH` to pull the audio track out of a video file:
+
+```bash
+brew install ffmpeg        # macOS
+# or: apt install ffmpeg   # Debian/Ubuntu
+```
+
+The first video/audio upload downloads the Whisper model weights (`WHISPER_MODEL_SIZE`,
+default `base`) and is noticeably slower than later ones, which reuse the cached model.
 
 ### 2. Ensure Ollama is Installed & Running
 
@@ -118,6 +129,33 @@ streamlit run frontend/Home.py
 ```
 
 - **Streamlit App URL**: `http://localhost:8501`
+
+---
+
+## 🎥 Video & Audio Meeting Support
+
+`POST /upload` and `POST /chat/upload` also accept a recorded meeting instead of a text
+transcript. The video/audio is transcribed locally before anything else happens, so the
+resulting text flows through the exact same summary, RAG, and multi-agent pipeline as an
+uploaded `.txt`/`.pdf`/`.docx` file — no separate "video mode."
+
+- **Video**: `.mp4`, `.mov`, `.mkv`, `.webm`, `.avi`, `.m4v`
+- **Audio**: `.mp3`, `.wav`, `.m4a`, `.aac`, `.flac`, `.ogg`
+- **Size limit**: `MAX_MEDIA_UPLOAD_SIZE_MB` (default 500 MB) vs. `MAX_UPLOAD_SIZE_MB`
+  (default 10 MB) for text documents.
+
+Pipeline: `ffmpeg` strips the audio track to 16kHz mono WAV, then `faster-whisper`
+(`WHISPER_MODEL_SIZE`, default `base`) transcribes it — entirely on this machine, the same
+local-first principle as the Ollama-backed LLM calls. Nothing audio/video-specific reaches
+ChromaDB or the agents; they only ever see plain text.
+
+```bash
+curl -X POST http://localhost:8000/upload \
+  -F "file=@standup_recording.mp4"
+```
+
+Because transcription of a long recording can take minutes, `FileParserService.parse_file`
+is run off the event loop (`asyncio.to_thread`) in both upload routes.
 
 ---
 
